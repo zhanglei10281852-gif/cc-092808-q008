@@ -302,3 +302,134 @@ class Page(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ImpactRuleCreate(BaseModel):
+    rule_code: str = Field(min_length=2, max_length=60)
+    rule_name: str = Field(min_length=2, max_length=200)
+    rule_type: str = Field(pattern="^(time_proximity|reagent_batch|equipment|workbench_slot)$")
+    discipline: str = Field(default="", max_length=100)
+    params: dict[str, Any] = Field(default_factory=dict)
+    created_by: str = Field(min_length=1, max_length=100)
+
+    @field_validator("rule_code")
+    @classmethod
+    def normalize_rule_code(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+class EventResourceInput(BaseModel):
+    resource_type: str = Field(pattern="^(reagent_batch|equipment|workbench)$")
+    resource_ref: str = Field(min_length=1, max_length=120)
+    observed_at: datetime | None = None
+    note: str = Field(default="", max_length=500)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("resource_ref")
+    @classmethod
+    def normalize_ref(cls, value: str) -> str:
+        return value.strip()
+
+
+class EventEvidenceInput(BaseModel):
+    evidence_type: str = Field(default="other", pattern="^(document|reading|alert|observation|other)$")
+    reference: str = Field(min_length=1, max_length=300)
+    summary: str = Field(default="", max_length=1000)
+    collected_at: datetime | None = None
+    recorded_by: str | None = Field(default=None, min_length=1, max_length=100)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class QualityEventCreate(BaseModel):
+    event_no: str = Field(min_length=3, max_length=60)
+    title: str = Field(min_length=2, max_length=200)
+    event_type: str = Field(default="blank_contamination", max_length=60)
+    contaminant: str = Field(default="", max_length=200)
+    discipline: str = Field(default="", max_length=100)
+    window_start: datetime
+    window_end: datetime
+    description: str = Field(default="", max_length=2000)
+    resources: list[EventResourceInput] = Field(default_factory=list, max_length=100)
+    evidence: list[EventEvidenceInput] = Field(default_factory=list, max_length=100)
+    created_by: str = Field(min_length=1, max_length=100)
+
+    @field_validator("event_no")
+    @classmethod
+    def normalize_event_no(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "QualityEventCreate":
+        if self.window_end < self.window_start:
+            raise ValueError("污染时间窗结束时间不能早于开始时间")
+        return self
+
+
+class EventResourcesAdd(BaseModel):
+    resources: list[EventResourceInput] = Field(min_length=1, max_length=100)
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class EventEvidenceAdd(BaseModel):
+    evidence_type: str = Field(default="other", pattern="^(document|reading|alert|observation|other)$")
+    reference: str = Field(min_length=1, max_length=300)
+    summary: str = Field(default="", max_length=1000)
+    collected_at: datetime | None = None
+    recorded_by: str | None = Field(default=None, min_length=1, max_length=100)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class EventClose(BaseModel):
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+    summary: str = Field(default="", max_length=1000)
+
+
+class ResourceUseCreate(BaseModel):
+    resource_type: str = Field(pattern="^(reagent_batch|equipment|workbench)$")
+    resource_ref: str = Field(min_length=1, max_length=120)
+    used_from: datetime | None = None
+    used_to: datetime | None = None
+    source_key: str = Field(min_length=3, max_length=120)
+    recorded_by: str = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "ResourceUseCreate":
+        if self.used_from and self.used_to and self.used_to < self.used_from:
+            raise ValueError("资源使用结束时间不能早于开始时间")
+        return self
+
+
+class CandidateDecision(BaseModel):
+    action: str = Field(pattern="^(exclude|confirm|reopen)$")
+    reason: str = Field(default="", max_length=1000)
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReportRegister(BaseModel):
+    report_no: str = Field(min_length=3, max_length=60)
+    document_ref: str = Field(default="", max_length=300)
+    conclusion_digest: str = Field(default="", max_length=500)
+    issued_by: str = Field(min_length=1, max_length=100)
+    issued_at: datetime | None = None
+
+    @field_validator("report_no")
+    @classmethod
+    def normalize_report_no(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+class WithdrawalDecision(BaseModel):
+    approve: bool
+    actor: str = Field(min_length=1, max_length=100)
+    note: str = Field(min_length=2, max_length=1000)
+
+
+class ReviewFlagClear(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    note: str = Field(min_length=2, max_length=1000)

@@ -7,14 +7,24 @@ from fastapi.responses import JSONResponse
 
 from app.api import audit, auth, roles, system, users
 from app.core.errors import DomainError
-from app.database import close_connection, init_db
+from app.database import close_connection, init_db, transaction
+from app.forensics.impact_router import router as impact_router
 from app.forensics.router import router as forensics_router
+from app.forensics.service import ForensicService
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     del app
     init_db()
+    # 服务重启后继续未完成的影响计算
+    try:
+        with transaction(immediate=True) as connection:
+            ForensicService(connection).impact.reconcile_on_startup()
+    except Exception as exc:  # pragma: no cover - 启动恢复不能阻断服务
+        import logging
+
+        logging.getLogger(__name__).warning("质量事件影响评估恢复失败：%s", exc)
     yield
     close_connection()
 
@@ -37,6 +47,7 @@ app.include_router(roles.router)
 app.include_router(audit.router)
 app.include_router(system.router)
 app.include_router(forensics_router)
+app.include_router(impact_router)
 
 
 @app.get("/")
