@@ -24,6 +24,9 @@ def check_command() -> dict:
     required = {
         "forensic_cases", "specimens", "storage_locations", "examinations",
         "review_schedules", "quality_alerts", "outbox_events",
+        "quality_incidents", "incident_rule_versions", "impact_evaluations",
+        "impact_candidates", "impact_dispositions", "examination_resources",
+        "examination_reports", "examination_review_flags", "report_withdrawal_reviews",
     }
     actual = {
         row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -100,6 +103,27 @@ def demo_command() -> dict:
     }
 
 
+def resume_evaluations_command(max_batches: int = 10) -> dict:
+    """服务重启后继续未完成的影响评估（按持久化游标确定性续跑）。"""
+    init_db()
+    with transaction(immediate=True) as connection:
+        results = ForensicService(connection).incidents.run_pending_evaluations(
+            worker="cli-resume", max_batches=max_batches
+        )
+    pending = get_connection().execute(
+        "SELECT COUNT(*) FROM impact_evaluations WHERE status!='completed'"
+    ).fetchone()[0]
+    return {
+        "processed": len(results),
+        "still_pending": int(pending),
+        "evaluations": [
+            {"id": item["id"], "incident_id": item["incident_id"], "status": item["status"],
+             "scanned_count": item["scanned_count"], "matched_count": item["matched_count"]}
+            for item in results
+        ],
+    }
+
+
 def export_command(path: str) -> dict:
     init_db()
     service = ForensicService(get_connection())
@@ -117,6 +141,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check-db", help="检查数据库完整性")
     subparsers.add_parser("smoke", help="执行 HTTP 冒烟检查")
     subparsers.add_parser("demo", help="写入一组示范入库数据")
+    resume = subparsers.add_parser("resume-impact-evaluations", help="继续未完成的质量事件影响评估")
+    resume.add_argument("--max-batches", type=int, default=10)
     export = subparsers.add_parser("export-forensic_cases", help="导出案件档案")
     export.add_argument("path")
     return parser
@@ -133,6 +159,8 @@ def main() -> int:
             result = smoke_command()
         elif args.command == "demo":
             result = demo_command()
+        elif args.command == "resume-impact-evaluations":
+            result = resume_evaluations_command(max_batches=args.max_batches)
         else:
             result = export_command(args.path)
         print(json.dumps(result, ensure_ascii=False, indent=2))

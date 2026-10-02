@@ -8,6 +8,7 @@ from app.forensics.custody import CustodyService
 from app.forensics.quality import ReleaseService, QualityService
 from app.forensics.repository import ForensicRepository
 from app.forensics.examinations import ExaminationService
+from app.forensics.incidents import IncidentService
 
 
 class ForensicService:
@@ -21,6 +22,7 @@ class ForensicService:
         self.examinations = ExaminationService(connection, clock)
         self.quality = QualityService(connection, clock)
         self.release = ReleaseService(connection, clock)
+        self.incidents = IncidentService(connection, clock)
 
     def dashboard(self) -> dict:
         return {
@@ -31,4 +33,7 @@ class ForensicService:
             "review_schedules": self.repository.count_table("review_schedules"),
             "quality_alerts": self.repository.count_table("quality_alerts"),
             "release_requests": self.repository.count_table("release_requests"),
+            "quality_incidents": self.repository.count_table("quality_incidents"),
+            "impact_candidates": self.repository.count_table("impact_candidates"),
+            "impact_evaluations": self.repository.count_table("impact_evaluations"),
         }

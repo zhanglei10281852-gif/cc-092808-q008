@@ -12,6 +12,9 @@ JSON_COLUMNS = {
     "contact_json": "restrictions",
     "detail_json": "detail",
     "payload_json": "payload",
+    "rules_json": "rules",
+    "hit_paths_json": "hit_paths",
+    "result_json": "result",
 }
 
 
@@ -167,6 +170,13 @@ class ForensicRepository:
         item["counts"] = records(self.connection.execute(
             "SELECT * FROM examination_observations WHERE examination_id=? ORDER BY checkpoint_no,sequence_no", (examination_id,)
         ).fetchall())
+        item["resources"] = self.examination_resources(examination_id)
+        item["reports"] = self.reports_for_examination(examination_id)
+        item["active_review_flags"] = records(self.connection.execute(
+            "SELECT f.*,i.incident_no FROM examination_review_flags f "
+            "JOIN quality_incidents i ON i.id=f.incident_id "
+            "WHERE f.examination_id=? AND f.status='pending' ORDER BY f.id", (examination_id,)
+        ).fetchall())
         return item
 
     def require_policy(self, policy_id: int) -> dict[str, Any]:
@@ -194,6 +204,137 @@ class ForensicRepository:
             raise NotFoundError("领用申请不存在")
         return item
 
+    # ---- 质量事件影响追踪 ----
+    def require_incident(self, incident_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM quality_incidents WHERE id=?", (incident_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("质量事件不存在")
+        return item
+
+    def incident_by_number(self, incident_no: str) -> dict[str, Any] | None:
+        return record(self.connection.execute("SELECT * FROM quality_incidents WHERE incident_no=?", (incident_no,)).fetchone())
+
+    def list_incidents(self, *, status: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
+        where = " WHERE status=?" if status else ""
+        params: list[Any] = [status] if status else []
+        total = int(self.connection.execute(f"SELECT COUNT(*) FROM quality_incidents{where}", params).fetchone()[0])
+        rows = self.connection.execute(
+            f"SELECT * FROM quality_incidents{where} ORDER BY id DESC LIMIT ? OFFSET ?", (*params, limit, offset)
+        ).fetchall()
+        return records(rows), total
+
+    def incident_rule_version(self, incident_id: int, version: int) -> dict[str, Any]:
+        item = record(self.connection.execute(
+            "SELECT * FROM incident_rule_versions WHERE incident_id=? AND version=?", (incident_id, version)
+        ).fetchone())
+        if item is None:
+            raise NotFoundError("事件规则版本不存在")
+        return item
+
+    def incident_active_rules(self, incident_id: int) -> dict[str, Any] | None:
+        incident = self.require_incident(incident_id)
+        if incident.get("active_rule_version") is None:
+            return None
+        return self.incident_rule_version(incident_id, int(incident["active_rule_version"]))
+
+    def incident_evidence(self, incident_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM incident_evidence WHERE incident_id=? ORDER BY id", (incident_id,)
+        ).fetchall())
+
+    def incident_resources(self, incident_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM incident_resources WHERE incident_id=? ORDER BY id", (incident_id,)
+        ).fetchall())
+
+    def incident_rule_versions(self, incident_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM incident_rule_versions WHERE incident_id=? ORDER BY version", (incident_id,)
+        ).fetchall())
+
+    def incident_evaluations(self, incident_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM impact_evaluations WHERE incident_id=? ORDER BY id", (incident_id,)
+        ).fetchall())
+
+    def require_evaluation(self, evaluation_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM impact_evaluations WHERE id=?", (evaluation_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("影响评估不存在")
+        return item
+
+    def require_candidate(self, candidate_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM impact_candidates WHERE id=?", (candidate_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("影响候选不存在")
+        return item
+
+    def candidate_by_examination(self, incident_id: int, examination_id: int) -> dict[str, Any] | None:
+        return record(self.connection.execute(
+            "SELECT * FROM impact_candidates WHERE incident_id=? AND examination_id=?", (incident_id, examination_id)
+        ).fetchone())
+
+    def incident_candidates(self, incident_id: int, *, status: str | None = None) -> list[dict[str, Any]]:
+        if status:
+            rows = self.connection.execute(
+                "SELECT * FROM impact_candidates WHERE incident_id=? AND status=? ORDER BY id", (incident_id, status)
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM impact_candidates WHERE incident_id=? ORDER BY id", (incident_id,)
+            ).fetchall()
+        return records(rows)
+
+    def candidate_dispositions(self, candidate_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM impact_dispositions WHERE candidate_id=? ORDER BY id", (candidate_id,)
+        ).fetchall())
+
+    def incident_decisions(self, incident_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM incident_decisions WHERE incident_id=? ORDER BY id", (incident_id,)
+        ).fetchall())
+
+    def examination_resources(self, examination_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM examination_resources WHERE examination_id=? ORDER BY id", (examination_id,)
+        ).fetchall())
+
+    def examination_resource_by_key(
+        self, examination_id: int, resource_type: str, resource_ref: str, used_from: str
+    ) -> dict[str, Any] | None:
+        return record(self.connection.execute(
+            "SELECT * FROM examination_resources WHERE examination_id=? AND resource_type=? AND resource_ref=? AND used_from=?",
+            (examination_id, resource_type, resource_ref, used_from),
+        ).fetchone())
+
+    def require_report(self, report_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM examination_reports WHERE id=?", (report_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("鉴定意见报告不存在")
+        return item
+
+    def report_by_number(self, report_no: str) -> dict[str, Any] | None:
+        return record(self.connection.execute("SELECT * FROM examination_reports WHERE report_no=?", (report_no,)).fetchone())
+
+    def reports_for_examination(self, examination_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM examination_reports WHERE examination_id=? ORDER BY id", (examination_id,)
+        ).fetchall())
+
+    def active_review_flag(self, incident_id: int, examination_id: int) -> dict[str, Any] | None:
+        return record(self.connection.execute(
+            "SELECT * FROM examination_review_flags WHERE incident_id=? AND examination_id=? AND status='pending'",
+            (incident_id, examination_id),
+        ).fetchone())
+
+    def open_incidents_matching_resource(self, resource_type: str, resource_ref: str) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT i.* FROM quality_incidents i JOIN incident_resources r ON r.incident_id=i.id "
+            "WHERE i.status!='closed' AND r.resource_type=? AND r.resource_ref=? ORDER BY i.id",
+            (resource_type, resource_ref),
+        ).fetchall())
+
     def release_detail(self, request_id: int) -> dict[str, Any]:
         item = self.require_release(request_id)
         item["items"] = records(self.connection.execute(
@@ -206,6 +347,7 @@ class ForensicRepository:
         allowed = {
             "forensic_cases", "specimens", "storage_locations", "examinations",
             "review_schedules", "quality_alerts", "release_requests",
+            "quality_incidents", "impact_candidates", "impact_evaluations",
         }
         if table not in allowed:
             raise ValueError("不允许统计该数据表")

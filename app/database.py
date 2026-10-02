@@ -375,6 +375,180 @@ CREATE TABLE IF NOT EXISTS release_items (
     status TEXT NOT NULL DEFAULT 'requested' CHECK(status IN ('requested','allocated','fulfilled','unavailable')),
     UNIQUE(request_id,case_id)
 );
+
+-- 检验资源使用台账（试剂批次、设备、工作台时段），允许迟到补录
+CREATE TABLE IF NOT EXISTS examination_resources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    examination_id INTEGER NOT NULL REFERENCES examinations(id) ON DELETE CASCADE,
+    resource_type TEXT NOT NULL CHECK(resource_type IN ('reagent_batch','equipment','workbench')),
+    resource_ref TEXT NOT NULL,
+    used_from TEXT NOT NULL,
+    used_to TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'on_time' CHECK(source IN ('on_time','late')),
+    recorded_by TEXT NOT NULL DEFAULT '',
+    recorded_at TEXT NOT NULL,
+    UNIQUE(examination_id,resource_type,resource_ref,used_from)
+);
+CREATE INDEX IF NOT EXISTS idx_exam_resources_match ON examination_resources(resource_type,resource_ref,used_from,used_to);
+-- 已签发鉴定意见（报告正文不可变，撤回只另建审查记录）
+CREATE TABLE IF NOT EXISTS examination_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_no TEXT NOT NULL UNIQUE,
+    examination_id INTEGER NOT NULL REFERENCES examinations(id) ON DELETE RESTRICT,
+    opinion_text TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    issued_by TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reports_examination ON examination_reports(examination_id);
+
+-- 质量事件影响追踪
+CREATE TABLE IF NOT EXISTS quality_incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_no TEXT NOT NULL UNIQUE,
+    incident_type TEXT NOT NULL DEFAULT 'blank_contamination',
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    window_slack_minutes INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','actioned','closed')),
+    active_rule_version INTEGER,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL,
+    closed_by TEXT,
+    closed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON quality_incidents(status,created_at);
+CREATE TABLE IF NOT EXISTS incident_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES quality_incidents(id) ON DELETE CASCADE,
+    evidence_type TEXT NOT NULL,
+    reference TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_evidence ON incident_evidence(incident_id,id);
+CREATE TABLE IF NOT EXISTS incident_resources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES quality_incidents(id) ON DELETE CASCADE,
+    resource_type TEXT NOT NULL CHECK(resource_type IN ('reagent_batch','equipment','workbench')),
+    resource_ref TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    added_rule_version INTEGER NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(incident_id,resource_type,resource_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_incident_resources ON incident_resources(incident_id,id);
+CREATE TABLE IF NOT EXISTS incident_rule_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES quality_incidents(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    rules_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','superseded')),
+    note TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(incident_id,version)
+);
+CREATE TABLE IF NOT EXISTS impact_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES quality_incidents(id) ON DELETE CASCADE,
+    rule_version INTEGER NOT NULL,
+    trigger TEXT NOT NULL CHECK(trigger IN ('register','late_resource','late_usage','rule_update','manual')),
+    deduplication_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','completed','failed')),
+    cursor_rule INTEGER NOT NULL DEFAULT 0,
+    cursor_key INTEGER NOT NULL DEFAULT 0,
+    scanned_count INTEGER NOT NULL DEFAULT 0,
+    matched_count INTEGER NOT NULL DEFAULT 0,
+    added_count INTEGER NOT NULL DEFAULT 0,
+    result_json TEXT,
+    error_message TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    locked_by TEXT,
+    locked_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_impact_evaluations_due ON impact_evaluations(status,id);
+CREATE TABLE IF NOT EXISTS impact_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES quality_incidents(id) ON DELETE CASCADE,
+    examination_id INTEGER NOT NULL REFERENCES examinations(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'candidate' CHECK(status IN ('candidate','excluded','confirmed')),
+    first_rule_version INTEGER NOT NULL,
+    last_rule_version INTEGER NOT NULL DEFAULT 0,
+    hit_paths_json TEXT NOT NULL DEFAULT '[]',
+    decided_by TEXT,
+    decided_at TEXT,
+    decision_reason TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(incident_id,examination_id)
+);
+CREATE INDEX IF NOT EXISTS idx_impact_candidates_status ON impact_candidates(incident_id,status);
+-- 确认影响时原子产生的处置：检材冻结、检验结果待复核、已签发意见撤回审查
+CREATE TABLE IF NOT EXISTS impact_dispositions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES quality_incidents(id) ON DELETE CASCADE,
+    candidate_id INTEGER NOT NULL REFERENCES impact_candidates(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL CHECK(target_type IN ('specimen_hold','examination_review_flag','report_withdrawal_review')),
+    target_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','reversed')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(incident_id,target_type,target_id)
+);
+CREATE TABLE IF NOT EXISTS examination_review_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES quality_incidents(id) ON DELETE CASCADE,
+    examination_id INTEGER NOT NULL REFERENCES examinations(id) ON DELETE CASCADE,
+    candidate_id INTEGER NOT NULL REFERENCES impact_candidates(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','cleared')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    cleared_by TEXT,
+    cleared_at TEXT,
+    clearance_note TEXT,
+    UNIQUE(incident_id,examination_id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_flags_active ON examination_review_flags(status,examination_id);
+CREATE TABLE IF NOT EXISTS report_withdrawal_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES quality_incidents(id) ON DELETE CASCADE,
+    report_id INTEGER NOT NULL REFERENCES examination_reports(id) ON DELETE CASCADE,
+    candidate_id INTEGER NOT NULL REFERENCES impact_candidates(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','withdraw','uphold')),
+    opened_by TEXT NOT NULL,
+    opened_at TEXT NOT NULL,
+    decided_by TEXT,
+    decided_at TEXT,
+    decision_reason TEXT,
+    UNIQUE(incident_id,report_id)
+);
+CREATE INDEX IF NOT EXISTS idx_withdrawal_reviews_open ON report_withdrawal_reviews(status,incident_id);
+-- 每项人工决定（排除误报、确认影响、撤回结论、关闭事件、发布规则）
+CREATE TABLE IF NOT EXISTS incident_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES quality_incidents(id) ON DELETE CASCADE,
+    candidate_id INTEGER REFERENCES impact_candidates(id) ON DELETE CASCADE,
+    decision_type TEXT NOT NULL CHECK(decision_type IN (
+        'candidate_excluded','candidate_confirmed','review_flag_cleared','withdrawal_review_decided','incident_closed','rules_published'
+    )),
+    actor TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_decisions ON incident_decisions(incident_id,id);
+
 CREATE TABLE IF NOT EXISTS outbox_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_key TEXT NOT NULL UNIQUE,
@@ -410,6 +584,8 @@ PERMISSIONS = [
     ("examination.read", "查看检验记录", "examination", "read"),
     ("examination.write", "执行检验任务", "examination", "write"),
     ("quality.review", "复核质量结果", "quality", "review"),
+    ("quality.incident.read", "查看质量事件影响追踪", "quality_incident", "read"),
+    ("quality.incident.manage", "管理质量事件影响追踪", "quality_incident", "manage"),
     ("release.approve", "审批鉴定领用", "release", "approve"),
 ]
 
@@ -497,8 +673,8 @@ def init_db() -> None:
         role_permissions = {
             "registrar": ["forensic_cases.read", "forensic_cases.write", "custody.read", "custody.write"],
             "technician": ["forensic_cases.read", "custody.read", "examination.read", "examination.write"],
-            "curator": ["forensic_cases.read", "custody.read", "examination.read", "quality.review", "release.approve"],
-            "auditor": ["forensic_cases.read", "custody.read", "examination.read", "audit.read"],
+            "curator": ["forensic_cases.read", "custody.read", "examination.read", "quality.review", "quality.incident.read", "quality.incident.manage", "release.approve"],
+            "auditor": ["forensic_cases.read", "custody.read", "examination.read", "quality.incident.read", "audit.read"],
         }
         for role_code, codes in role_permissions.items():
             role_id = connection.execute("SELECT id FROM roles WHERE code=?", (role_code,)).fetchone()[0]
